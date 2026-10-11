@@ -46,3 +46,8 @@
 - 選擇後漸近推論與信賴區間。
 - 非平穩、異步／informative missingness，以及交通／天氣工具有效性。
 - 新建 GitHub Actions 尚未在遠端執行；本機測試已通過。
+
+
+## v0.2.0：無 pilot 對照（同日新增）
+
+本機完整測試增至47項，全數通過。新增900次固定情境／trial的成本與日曆期限對照，結果與限制見 [BENCHMARK_NO_PILOT.md](BENCHMARK_NO_PILOT.md)。上方5次pilot檢查是v0.1.0的歷史紀錄，並非目前唯一的實驗證據；兩個runner的預算、時間區間與Random定義不同，不直接合併。

@@ -2,7 +2,7 @@
 
 PIVoTS 研究時間序列中「每個工具區塊都不足以識別完整因果參數」的問題：先建立有效的動態 IV moments，再選擇區塊、估計局部投影與整合資訊。
 
-目前完成：動態識別修正、母體／有限樣本驗證、可重現的有限預算基準，以及**付費 pilot 引導的區塊選擇原型**。一般一致性／選擇後推論定理、大規模性能證據與異步資料方法仍待完成。現有小規模檢查不構成新 selector 優於 Random 的證據。
+目前版本 **v0.2.0**：已完成動態識別修正、可重現基準、付費 pilot 原型，以及真正無 pilot Random 的成本／日曆期限對照。900次初步實驗未顯示pilot普遍優於Random；在刻意設計的方向重複情境，pilot資訊選擇提高了母體識別成功率。一般一致性／選擇後推論定理、完整性能研究與異步資料方法仍待完成。
 
 ## 環境
 
@@ -52,6 +52,21 @@ python run_pilot_selection.py --output Simulation_Results/pilot_smoke \
 
 Pilot 與正式資料取自同一條時間序列的不同區段，中間留 `gap`。有限 gap 不代表獨立；尚未建立選擇後信賴區間。樣本 rank 亦不能證明母體強識別。Rank 不足的 trial 明確回報投影代表解，其完整參數誤差留空；摘要標明條件樣本，配對比較使用共同完整 rank 的 trial。
 
+## 無 pilot Random：主要成本基準
+
+```sh
+python run_selection_benchmark.py --output Simulation_Results/no_pilot_smoke \
+  --n_runs 3 --n_pilot 60 --n_main 80 --gap 30 \
+  --p 3 --d 6 --block_size 2 --instrument_budget 4 \
+  --dgp_seeds 81 --scenarios dense heterogeneous redundant
+```
+
+比較五種策略：無pilot Random（相同n／近似同總成本）、pilot Random、pilot資訊選擇、pilot強度選擇。真正無pilot的策略在看資料前抽取區塊、pilot成本為0，以自己的正式資料估計。省下的pilot成本可以增加正式樣本，但不可超過共同觀測期限。
+
+成本模型假設整段X/Y已經存在，只收取新增IV觀測成本。正式工具數上限不限制pilot暫時觀測全部候選。結果分開報告母體欠識別、樣本rank、數值失敗、條件RMSE、尾部與配對MSE差；不得只憑成功trial的誤差判斷整體優劣。
+
+輸出包括先於模擬固定的 `protocol.json`、含每個trial的 `benchmark_results.json`、逐DGP的兩份摘要CSV。新的runner拒絕覆寫結果；不與舊schema的報表混用。此次900次實驗與完整指令見 [無pilot比較紀錄](docs/BENCHMARK_NO_PILOT.md)。
+
 ## 圖表與正式網格
 
 ```sh
@@ -85,6 +100,15 @@ python plot_simulation_summary.py \
 每完成一個研究階段，先通過對應測試並記錄實驗的限制，再更新本節、建立 Git commit 與版本標籤，推送至 GitHub。研究開發使用 `codex/research-stages` 分支；尚未完成的工作不標示為已驗證。原始大量模擬輸出不提交，提交可重現指令、設定與精簡驗證紀錄。
 
 ## 版本變更
+
+### v0.2.0 — 2026-10-11：無 pilot Random 與成本／期限對照
+
+- 新增真正零pilot成本的Random與節省成本增加樣本的基準，共五個比較arms。
+- 加入共同日曆期限、預算餘額、母體識別診斷、獨立失敗記錄及逐DGP配對統計。
+- 固定dense／強弱不均／重複方向三情境、三個結構seed，每組100次，共900次；全部符合預算與期限。
+- 47項本機測試通過。一般與強弱不均情境未見穩定pilot優勢；重複方向情境pilot資訊選擇完整識別96%，Random38–39%，條件RMSE不能替代識別成功率。
+- 提交重現設定、程式雜湊與精簡結果；原始trial輸出保留本機。詳見 [實驗紀錄與限制](docs/BENCHMARK_NO_PILOT.md)。
+- 下一步：pilot長度／預算／工具強度／近似重複的敏感度，以及選擇後理論；尚未完成一般推論或性能優越性證明。
 
 ### v0.1.0 — 2026-10-11：識別修正、可重現基準與 pilot 原型
 

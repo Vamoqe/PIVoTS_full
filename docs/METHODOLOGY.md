@@ -26,6 +26,26 @@
 
 資訊準則是可執行的候選 heuristic，不宣稱一般 submodularity、全域最優或必然在預算內找出滿 rank 集合。Full sample rank 不等於強識別。所有推論目前限於點估計；沒有後選擇信賴區間。
 
+## 第四階段：無 pilot 的成本與日曆期限對照
+
+新增 `run_selection_benchmark.py`，保留原本 paid-pilot runner 作為歷史對照。五個 arms 為無 pilot Random（相同正式樣本數）、無 pilot Random（利用總預算增加樣本）、pilot Random、pilot information、pilot strength。
+
+所有 Random arms 在資料產生前用獨立 selection seed 抽取同一組區塊。無 pilot 方法從時間列 0 開始正式觀測，尺度只用自身正式 X；pilot 方法用前段 pilot 的尺度與 moments，正式區間從 `n_pilot+3+gap` 開始。有限 gap 不被當成獨立性的證明。
+
+總日曆期限為 `H=n_pilot+n_main+gap+6` 列。每個選中工具需要 `n+1` 列 IV／IV 歷史，總預算為 `B=(n_pilot+1)*d+(n_main+1)*k`，其中 k 是正式選中工具數。無 pilot 的追加樣本數為 `min(floor(B/k)-1,H-3)`；完整記錄餘額，不把離散成本或期限上限造成的未使用預算說成完全花完。
+
+**成本適用範圍：** 整個 H 期間的 X/Y 是已存在且各方法均可使用的資料，只比較新增 IV 觀測成本。不同樣本數的 X/Y 若需要付費，此成本模型不適用。正式工具數上限是 k；pilot 暫時觀測全部 d 個候選，因此不是「任何時間最多只能觀測 k 個工具」的硬體上限設計，也未計算來源開通費。
+
+預先固定三種 first-stage 結構，其他結構係數保持相同；每個 DGP seed 之下，三種情境的 first-stage Frobenius norm 相同：
+
+1. `dense`：原本同幅度範圍的隨機正負係數。
+2. `heterogeneous`：區塊強度因子由 0.15 到 1 的等比序列，排列由 seed 固定。
+3. `redundant`：區塊 1 複製區塊 0 的 first-stage 係數，再調整整體尺度；其餘區塊保留。候選聯集仍必須母體滿秩。
+
+真實母體 moments 只用於情境驗證和選擇後評估，沒有傳入 selector。除了樣本 rank，亦回報選中區塊的母體 rank、原始參數單位下 G 的最小奇異值與 condition number。後者是模型診斷，不是實務資料可取得的 IV 有效性測試。母體或樣本 rank 不足時，完整 beta 的誤差為空值，並且明列識別失敗數。
+
+每個固定 DGP 的重複抽樣分別摘要，主比較為相對無 pilot、近似同總成本 Random 的配對 squared-error 差與 MCSE；另保存對 pilot Random 的比較。配對誤差只使用雙方有效的共同 trials，明列排除數。這是條件比較，不能替代識別成功率。不同 DGP 的結果不當成同一固定分布來計算 MCSE。各 selector 的失敗獨立記錄，共同 pilot 初始化失敗則同時影響依賴它的 selectors。
+
 ## 尚待完成的研究
 
 1. 在固定有限候選、適当 mixing/矩條件、pilot/main 成長速度、時間間隔、HAC 一致性與分數間隔等條件下，完整證明選擇後一致性；需要漸近常態時再處理有效變異數。

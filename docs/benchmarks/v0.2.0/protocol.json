@@ -1,0 +1,72 @@
+{
+  "config": {
+    "block_size": 3,
+    "calendar": "common total horizon; no-pilot starts immediately, pilot main starts after pilot and gap",
+    "capacity_scope": "instrument_budget caps formal IV count; broad pilot temporarily observes all d",
+    "checkpoint_interval": 10,
+    "cost_unit": "one IV variable at one time, including required history",
+    "d": 15,
+    "dgp_seeds": [
+      253,
+      517,
+      809
+    ],
+    "gap": 100,
+    "hac_bandwidth": null,
+    "instrument_budget": 12,
+    "n_main": 1000,
+    "n_pilot": 300,
+    "n_runs": 100,
+    "observation_plan": {
+      "calendar_rows": 1406,
+      "hac_bandwidth": null,
+      "no_pilot_budget_only_n": 1376,
+      "no_pilot_calendar_capped": false,
+      "no_pilot_equal_budget_n": 1376,
+      "pilot_cost": 4515,
+      "pilot_main_start": 403,
+      "total_budget": 16527
+    },
+    "p": 10,
+    "primary": "no_pilot_random_equal_budget",
+    "randomization": "shared Random schedule drawn independently before observing data",
+    "rank_tolerance": 1e-09,
+    "scenario_strength": "first-stage Frobenius norm fixed across scenarios for each DGP seed",
+    "scenarios": [
+      "dense",
+      "heterogeneous",
+      "redundant"
+    ],
+    "selection_score": "pilot joint-HAC regularized logdet increment per cost; ridge=1e-6",
+    "standardization": "pilot arms use pilot X; no-pilot arms use their own main X",
+    "target_rho": 0.8,
+    "uncertainty": "conditional Monte Carlo errors within fixed DGP; no post-selection confidence intervals",
+    "xy_assumption": "full-horizon X/Y are existing records available to all arms; zero incremental X/Y cost"
+  },
+  "config_sha256": "665d1ed04e2cf748fcfbd5386a68c3c0733dde44b686cab0a8aa01fcef5d5ea7",
+  "version": {
+    "git_commit": "c64e5fb3a8ed4fb979b9252518b9e69387a6ae72",
+    "runtime": {
+      "jax": "0.6.0",
+      "jax_enable_x64": false,
+      "jaxlib": "0.6.0",
+      "numpy": "2.3.1",
+      "python": "3.12.11",
+      "scikit-learn": "1.7.0",
+      "scipy": "1.15.3",
+      "statsmodels": "0.14.4"
+    },
+    "source_sha256": {
+      "benchmark_reporting.py": "4b075a05c05390b257685a13ba895d3bf17937ec3e7b19b08602c8dae4faa17d",
+      "block_iv.py": "c14376a912cf8b643b4359562739b8a506367a9e2bfe01dc975f5445da2ded73",
+      "confounder_strength.py": "ebdb0cff7868c8cb5b932394be4fe3a3e3ed7247d22adb095dbd466c69bd51c0",
+      "dynamic_iv.py": "2dd7527ebfe6652d5bd4df61f3733f58b01b1fc9ca8424fbe23a19e120eb4f6a",
+      "optimization_submodular.py": "fde077ec45b404d68df3b3598da3f51a8566ac302293f7058ad01c0eccc55181",
+      "run_optimization.py": "8a7ea16929705e4532d3690b7c51847655c46dd89cf99bcb42a93fcd194199b9",
+      "run_selection_benchmark.py": "9cabb7f51da4b6af262d01f88cf73ce250e52ad42e36f0efbf5ee0b3024975be",
+      "simulation.py": "215c88a435b342dee95511ce76f6ab4166260478f2e1cef2df61a3f03557b4fc",
+      "svd_2sls.py": "47c31f5b68428f81f4e9fb34576c67c286fc2b286020079ca4077166c815ecac",
+      "utils.py": "8883f393e07b20935564be8aa8ba03f1ffe5230815c85c7286921409351c0f0f"
+    }
+  }
+}
