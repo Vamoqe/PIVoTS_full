@@ -292,6 +292,7 @@ def generate_time_scenario(
     beta_strength=1.0,
     n_confounders=3,
     seed=253,
+    persistence_mode="diagonal",
 ):
     """
     Generate a stable VAR(1) transition matrix with controlled IV and confounding structure.
@@ -306,6 +307,12 @@ def generate_time_scenario(
         H -> Y
     """
 
+    if not 0 <= target_rho < 1 or d < 1 or p < 1:
+        raise ValueError("Require positive dimensions and 0 <= target_rho < 1")
+    if persistence_mode not in {"diagonal", "legacy_rescale"}:
+        raise ValueError("persistence_mode must be diagonal or legacy_rescale")
+    if n_confounders < 0 or (d_identify is not None and d_identify < 0):
+        raise ValueError("Active dimension counts cannot be negative")
     rng = np.random.default_rng(seed)
 
     l = p
@@ -360,8 +367,14 @@ def generate_time_scenario(
         * rng.choice([-1, 1], size=(len(id_Y), len(active_H)))
     )
 
-    # Rescale to desired spectral radius
-    A = rescale_transition_matrix(A, target_rho=target_rho)
+    # Change persistence without scaling causal/first-stage structural effects.
+    # Stationary variances and effective precision can still change with rho.
+    if persistence_mode == "legacy_rescale":
+        A = rescale_transition_matrix(A, target_rho=target_rho)
+    else:
+        A[np.ix_(id_I, id_I)] = (2 * target_rho / 3) * np.eye(d)
+        A[np.ix_(id_X, id_X)] = (2 * target_rho / 3) * np.eye(p)
+        A[np.ix_(id_H, id_H)] = target_rho * np.eye(l)
 
     return {1: A}
 
@@ -414,7 +427,7 @@ def generate_rv(key, d, p, n):
 def generate_model(alpha, beta, z, u, e, M, lam, error_model="simple"):
     """
     generate samples from the instrumental variable model specified with the parameters $\alpha, \beta, e,
-    M$ and the list $\lambda$ that specifies which instruments are currently switched on
+    M$ and the list $lambda$ that specifies which instruments are currently switched on
 
     Parameters
     ----------
@@ -453,7 +466,7 @@ def generate_model(alpha, beta, z, u, e, M, lam, error_model="simple"):
 
     return x, y, z
 
-def generate_time_model(A, d, p, n, seed=None):
+def generate_time_model(A, d, p, n, seed=None, initialization="stationary"):
     """
     A: ndarray  parameter of causal and time series
     """
@@ -465,14 +478,13 @@ def generate_time_model(A, d, p, n, seed=None):
     l = p # confounder dim
     id_I, id_X, id_H, id_Y = np.split(np.arange(d+p+l+1), np.cumsum([d, p, l, 1]))[:4]
     #id_I = id_I[lam] # turn on/off some instrumental variable
-    data = simulation.sim_data(A,n+3,seed=seed)
+    data = simulation.sim_data(A,n+3,seed=seed,initialization=initialization)
     I, X, Y = data[:,id_I], data[:,id_X], data[:,id_Y]
 
     #I_j = np.asarray(I[1:n+1]) # First data of I_j can't b e conditionedS
     #X_j = np.asarray(X[2:n+2]) # X in the time domain of I_j
     #Y_j = np.asarray(Y[3:n+3]) # Y in the time domain of I_j
     #breakpoint()
-    print("X,Y,I generated")
     
     return X, Y, I
 """
@@ -493,31 +505,33 @@ def generate_time_model(A, d, p, n, seed=None):
     r_Y = get_2d(Y_j) - get_2d(predict(get_2d(Y_j), get_2d(B)))
     return r_X, r_Y, r_I
 """
-def truncated_residual(X,Y,I_raw,n,lam):
+def truncated_residual(X, Y, I_raw, n, lam):
+    """Align Y_t, X_{t-1}, I_selected,t-2 and condition on I_selected,t-3.
 
-    predict = lambda x,b: sm.OLS(x, b).fit().predict()
-    def get_2d(a):
-        if len(a.shape) <= 1:
-            a = a.reshape(-1, 1)
-        return a    
-    
-    I = I_raw[:,lam]
-
-    I_j = np.asarray(I[1:n+1]) # First data of I_j can't be conditioned
-    X_j = np.asarray(X[2:n+2]) # X in the time domain of I_j
-    Y_j = np.asarray(Y[3:n+3]) # Y in the time domain of I_j  
-
-    B = np.hstack((
-        #get_2d(np.asarray(I[0:n])),                  #PA(I_j)
-        get_2d(np.asarray(X[1:n+1])),                #PA(X_j)
-        #get_2d(np.asarray(Y[2:n+2]))                 #PA(Y_j)
-                  ))
-    B = sm.add_constant(B)
-    #breakpoint() 
-    r_I = get_2d(I_j) - get_2d(predict(get_2d(I_j), get_2d(B)))       
-    r_X = get_2d(X_j) - get_2d(predict(get_2d(X_j), get_2d(B)))
-    r_Y = get_2d(Y_j) - get_2d(predict(get_2d(Y_j), get_2d(B)))
-    return r_X, r_Y, r_I
+    Validity requires autonomous selected IV blocks, exclusion and innovation
+    exogeneity; see dynamic_iv.validate_selected_instrument_history. This
+    numerical residualizer alone does not establish IV validity. An empty
+    selection centers X/Y for the OLS comparison.
+    """
+    from dynamic_iv import instrument_indices
+    X, Y, I_raw = (np.asarray(a, dtype=float) for a in (X, Y, I_raw))
+    if Y.ndim == 1:
+        Y = Y[:, None]
+    if X.ndim != 2 or Y.ndim != 2 or I_raw.ndim != 2 or Y.shape[1] != 1:
+        raise ValueError("Expected 2D X/I and a scalar outcome")
+    if not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError("n must be a positive integer")
+    if any(len(a) < n+3 or not np.all(np.isfinite(a)) for a in (X, Y, I_raw)):
+        raise ValueError("Need at least n+3 finite observations per series")
+    idx = instrument_indices(lam, I_raw.shape[1])
+    I = I_raw[:, idx]
+    B = np.column_stack((np.ones(n), I[:n]))
+    if n <= B.shape[1]:
+        raise ValueError("More observations than historical controls are required")
+    aligned = np.column_stack((X[2:n+2], Y[3:n+3], I[1:n+1]))
+    residual = aligned - B @ np.linalg.lstsq(B, aligned, rcond=None)[0]
+    p = X.shape[1]
+    return residual[:, :p], residual[:, p:p+1], residual[:, p+1:]
 
 
 def save_scenario(key, alpha, beta, e, m, save_path, name_id="scen",A = None,X = None,Y = None,I = None):
@@ -610,5 +624,4 @@ def generate_clean_time_iv_model(
     Y = X @ beta_true + H @ gamma + rng.normal(0, noise_y, size=n)
 
     return X, Y.reshape(-1, 1), I, H
-
 

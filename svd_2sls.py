@@ -1,112 +1,62 @@
-
+"""Local identified projections and least-squares reconstruction."""
 import numpy as np
-from sklearn.linear_model import LinearRegression
-import sys
-import logging
-import cvxpy as cp
-logging.basicConfig(level=20)
-sys.path.insert(0, "../src")
 
 
-def svd_2sls(x, y, z, max_iv=2, eps=0.01):
+def svd_2sls(x, y, z, max_iv=2, eps=1e-8):
+    """Return (projected coefficient including intercept, P, I-P).
+
+    eps is an absolute cutoff on singular values divided by sqrt(n). It is
+    a numerical rank tolerance, not a weak-instrument validity test. Inputs
+    should use a documented common scale. No n-by-n matrix is allocated.
     """
-    $\beta$-estimation estimation of image and nullspace for the underspecified setting
+    x, z = np.asarray(x,dtype=float), np.asarray(z,dtype=float)
+    y = np.asarray(y,dtype=float).reshape(-1)
+    if x.ndim != 2 or z.ndim != 2 or len(x) != len(z) or len(y) != len(x) or not len(x):
+        raise ValueError('X, Y and Z must have matching nonempty sample dimensions')
+    if not all(np.all(np.isfinite(v)) for v in (x,y,z)) or eps < 0 or max_iv < 0:
+        raise ValueError('Inputs and tolerances must be finite and valid')
+    n, p = x.shape
+    xx = np.column_stack((np.ones(n),x))
+    zz = np.column_stack((np.ones(n),z))
+    xhat = zz @ np.linalg.lstsq(zz,xx,rcond=None)[0]
+    U,D,VT = np.linalg.svd(xhat,full_matrices=False)
+    rank = min(int(np.sum(D/np.sqrt(n) > eps)),int(max_iv)+1)
+    V = VT[:rank].T
+    beta = V @ ((U[:,:rank].T @ y)/D[:rank])
+    P = V @ V.T
+    return beta, P, np.eye(p+1)-P
 
-    Parameters
-    ----------
-    x: ndarray
-    y: ndarray
-    z: ndarray
-    max_iv: int
-        maximum dimension of the image space
-    eps: float
-        cut-off of eigenvalues
 
-    Returns
-    -------
-    beta: ndarray
-    PV: ndarray
-        projection matrix on image space
-    PV_comp: ndarray
-        projection matrix on orthogonal part of image space
+def combine_svd_estimation(beta_list, P_list, ridge=0.0):
+    """Least-squares reconstruction; rank deficiency returns a minimum-norm
+    representative, not an identified full parameter. Fixed ridge is optional
+    shrinkage and does not recover unidentified directions.
     """
-
-    ## First stage regression
-    xx = np.hstack([np.ones(x.shape[0])[..., np.newaxis], x])
-    reg1 = LinearRegression(fit_intercept=True).fit(z, xx)
-    xhat = reg1.predict(z)
-
-    ## Singular value decomposition of the first step
-    U, D, VT = np.linalg.svd(xhat)
-
-    ## Preparation of variables, Truncation
-    rank_D = np.min([(D > eps).sum(), max_iv + 1])
-    U1, D1, VT1 = U[:, :rank_D], D[:rank_D], VT[:rank_D, :]
-    VT1_comp = VT[rank_D:, :]
-    VT1 = VT[:rank_D, :]
-
-    ## Computation of beta estimate
-    beta_est = VT1.T @ np.diag(1 / D1) @ U1.T @ y
-    V1_comp = VT1_comp.T
-    V1 = VT1.T
-
-    ## Computation of projection matrices for further computation purposes
-    def projection(P1):
-        return P1@np.linalg.solve(P1.T@P1, P1.T)
-
-    P1_comp = projection(V1_comp)
-    P1 = projection(V1)
-
-    return beta_est, P1, P1_comp
+    if not beta_list or len(beta_list) != len(P_list) or ridge < 0:
+        raise ValueError('Need matching nonempty projections and estimates, ridge >= 0')
+    p = np.asarray(beta_list[0]).size
+    Q = np.vstack(P_list)
+    theta = np.concatenate([np.asarray(b).reshape(-1) for b in beta_list])
+    if Q.shape != (len(P_list)*p,p) or not np.all(np.isfinite(Q)) or not np.all(np.isfinite(theta)):
+        raise ValueError('Invalid projection/estimate shapes or values')
+    if ridge:
+        Q = np.vstack((Q,np.sqrt(ridge)*np.eye(p)))
+        theta = np.concatenate((theta,np.zeros(p)))
+    return np.linalg.lstsq(Q,theta,rcond=None)[0]
 
 
-def combine_svd_estimation(beta_list, P_list, ridge=1e-8):
+def check_component_coverage(P_list, eps=1e-8):
+    """Angles to the union span; zero projected directions have angle pi/2.
+
+    This is geometric coverage, not confidence interval coverage or IV strength.
     """
-    Least-squares aggregation of multiple projected beta estimates.
-
-    Solve:
-        min_b sum_r ||P_r b - beta_r||^2 + ridge * ||b||^2
-
-    This is more stable than exact equality constraints in finite samples.
-    """
-    dim_b = len(beta_list[0])
-
-    lhs = ridge * np.eye(dim_b)
-    rhs = np.zeros(dim_b)
-
-    for beta_r, P_r in zip(beta_list, P_list):
-        beta_r = np.asarray(beta_r).reshape(-1)
-        lhs += P_r.T @ P_r
-        rhs += P_r.T @ beta_r
-
-    beta_combined = np.linalg.solve(lhs, rhs)
-    return beta_combined
-
-def check_component_coverage(P_list, eps=0.1):
-    """
-    returns a vector which can be used to compute the coverage of the standard basis
-
-    Parameters
-    ----------
-    P_list: list of ndarrays
-
-    Returns
-    -------
-    vec
-    """
-
-    P_union = np.hstack([proj for proj in P_list])
-    U, D, _ = np.linalg.svd(P_union)
-    rank_D = (D > eps).sum()
-    # determine a basis for the column space of P_union
-    U_col = U[:, :rank_D]
-    P_col = U_col@U_col.T
-    p, _ = P_col.shape
-
-    # compute the angle between the two vectors
-    cover = []
-    for jter in np.arange(p):
-        p_vec = P_col[:, jter]
-        cover.append(p_vec[jter] / np.sqrt(p_vec@p_vec))
-
-    return np.arccos(cover)
+    if not P_list or eps < 0:
+        raise ValueError('Need projections and a nonnegative rank tolerance')
+    P = np.hstack(P_list)
+    if P.ndim != 2 or not np.all(np.isfinite(P)):
+        raise ValueError('Projection matrices must be finite')
+    U,D,_ = np.linalg.svd(P,full_matrices=False)
+    basis = U[:,D > eps]
+    projection = basis @ basis.T
+    # For an orthogonal projector ||P e_j||^2 = P_jj.
+    return np.arccos(np.sqrt(np.clip(np.diag(projection),0.0,1.0)))

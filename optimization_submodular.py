@@ -53,24 +53,21 @@ class LinearExperiment(Experiment):
         -------
 
         """
-        #test for git
-        self._key, _ = jax.random.split(self._key, 2)
-
         d, p = self.alpha.shape
-        ## Generate random variables
-        z, u = generate_rv(self._key, d, p, self.n)
-
-        ## Generate dataset
-        x1, y1, z1 = generate_model(self.alpha, self.beta, z, u, self.e, self.M, lam)
-        #print(f"normal:{x1.shape},{y1.shape},{z1.shape}")
-        #print(z)
-        if self.time_setting == True:
-            x, y, z = truncated_residual(self.X,self.Y,self.I,self.n,lam)
-            y = y.flatten() # fix the error that y will have additional dimension
-            #breakpoint()
-        #print(f"time:{x.shape},{y.shape},{z.shape}")
-        #breakpoint()
-        return x, y, z
+        if self.time_setting:
+            from dynamic_iv import instrument_indices, validate_selected_instrument_history
+            idx = instrument_indices(lam, d)
+            cache = getattr(self, "_validated_blocks", set())
+            block = tuple(idx)
+            if block not in cache:
+                validate_selected_instrument_history(self.A, d, p, idx)
+                cache.add(block)
+                self._validated_blocks = cache
+            x, y, z = truncated_residual(self.X, self.Y, self.I, self.n, idx)
+            return x, y.ravel(), z
+        self._key, subkey = jax.random.split(self._key)
+        z, u = generate_rv(subkey, d, p, self.n)
+        return generate_model(self.alpha, self.beta, z, u, self.e, self.M, lam)
 
 
 class BaseSet:
@@ -90,38 +87,39 @@ class SetProposal:
                  similarity_matrix=None,
                  BaseSet=None,
                  selection_method="similarity",
-                 key=jax.random.PRNGKey(2710)
+                 key=jax.random.PRNGKey(2710),
+                 round_sizes=None
                  ):
 
-        # parameters for method
-        self._d_max = d_max
-        self._budget = budget
-        self._experiment = experiment
-        self._selection_method = selection_method  # choice between "random", "similarity"
-        self._selection_trajectory = []
-        self._estimation_trajectory = []
-        self._n_rounds = n_rounds
-        self._iter_round = 0
-        self._similarity_alpha = similarity_matrix
-        self._key = key
+        if not isinstance(n_rounds, (int, np.integer)) or n_rounds < 1 or d_max < 1 or budget < 0 or np.isnan(budget):
+            raise ValueError("Require positive rounds/d_max and nonnegative budget")
+        if selection_method not in {"similarity", "random"}:
+            raise ValueError("Unknown selection method")
+        similarity_matrix = np.asarray(similarity_matrix, dtype=float)
+        if similarity_matrix.ndim != 2 or not np.all(np.isfinite(similarity_matrix)):
+            raise ValueError("Need finite two-dimensional selection features")
+        if round_sizes is not None:
+            round_sizes = list(round_sizes)
+            if len(round_sizes) != n_rounds or any(not isinstance(v, (int,np.integer)) or not 1 <= v <= d_max for v in round_sizes):
+                raise ValueError("round_sizes must specify a positive size <= d_max for each round")
+        self._round_sizes = round_sizes
+        self._d_max, self._budget = int(d_max), budget
+        self._experiment, self._selection_method = experiment, selection_method
+        self._selection_trajectory, self._estimation_trajectory = [], []
+        self._n_rounds, self._iter_round = n_rounds, 0
+        self._similarity_alpha, self._key = similarity_matrix, key
         self._estimation_function = svd_2sls
-
-        # initialize algorithm
-        if BaseSet is None:
-            self.current_idxs = []
-            self.current_beta = None
-            self._coverage_trajectory = []
-            self._beta_trajectory = []
-            self._P_trajectory = []
-            self._possible_idx_sets = list(np.arange(similarity_matrix.shape[0]))
-
-        else:
-            self.current_idxs = BaseSet.idxs
-            self.current_beta = BaseSet.beta
-            self._coverage_trajectory.append(check_component_coverage([BaseSet.PV]))
-            self._beta_trajectory.append(BaseSet.beta)
+        self._coverage_trajectory, self._beta_trajectory, self._P_trajectory = [], [], []
+        self.cumulative_cost, self._cost_trajectory = 0, []
+        self.current_idxs, self.current_beta = [], None
+        if BaseSet is not None:
+            from dynamic_iv import instrument_indices
+            self.current_idxs = instrument_indices(BaseSet.idxs, len(similarity_matrix)).tolist()
+            self.current_beta = np.asarray(BaseSet.beta).copy()
+            self._beta_trajectory.append(self.current_beta)
             self._P_trajectory.append(BaseSet.PV)
-            self._possible_idx_sets = list(np.arange(similarity_matrix.shape[0])).remove(BaseSet.idxs)
+        # A BaseSet is an already-acquired seed; only additional acquisition is charged.
+        self._possible_idx_sets = [i for i in range(len(similarity_matrix)) if i not in self.current_idxs]
 
         # parameters for evaluation
         self.figure = go.Figure()
@@ -227,15 +225,17 @@ class SetProposal:
         -------
 
         """
-        budget = 0.0
-
-        while (budget < self._budget) & (len(self._possible_idx_sets) > 0) & (self._iter_round < self._n_rounds):
-
-            # make list of possible candidates
-            idxs_sets = [[list(comb) for comb in combinations(self._possible_idx_sets, comb_i + 1)] for comb_i in
-                         np.arange(self._d_max)]
-            idxs_sets = [item for sublist in idxs_sets for item in sublist]  # flatten the whole list
-
+        budget = self.cumulative_cost
+        while budget < self._budget and self._possible_idx_sets and self._iter_round < self._n_rounds:
+            remaining = self._budget-budget
+            if self._round_sizes is None:
+                sizes = range(1, min(self._d_max, len(self._possible_idx_sets))+1)
+            else:
+                sizes = [self._round_sizes[self._iter_round]]
+            idxs_sets = [list(c) for size in sizes if size <= remaining
+                         for c in combinations(self._possible_idx_sets, size)]
+            if not idxs_sets:
+                break
 
             # select most promising idx set
             best_idx = self._select(idxs_sets)
@@ -267,6 +267,8 @@ class SetProposal:
             self._coverage_trajectory.append(cover_vec)
 
             budget += self._cost_budget(best_idx, budget_method)
+            self.cumulative_cost = budget
+            self._cost_trajectory.append(budget)
 
             self._possible_idx_sets = [idx for idx in self._possible_idx_sets if idx not in self.current_idxs]
             self._iter_round += 1

@@ -1,15 +1,15 @@
 import os
+import argparse
+from pathlib import Path
+from make_simulation_tables import load_result, summarize_errors
 import numpy as np
 import matplotlib.pyplot as plt
 
 
-def load_result(path):
-    return np.load(os.path.join(path, "results.npy"), allow_pickle=True).item()
-
-
 def norm_error(diff_array):
     arr = np.asarray(diff_array, dtype=float)
-    return np.linalg.norm(arr, axis=1)
+    error = np.linalg.norm(arr, axis=1)
+    return error[np.isfinite(error)]  # Counts of omitted failures are saved in the summary CSV.
 
 
 def trajectory_error(diff_traj):
@@ -34,44 +34,11 @@ def coverage_score(cover_traj, threshold=0.3):
 def mean_se(x, axis=0):
     x = np.asarray(x, dtype=float)
     mean = x.mean(axis=axis)
-    se = x.std(axis=axis, ddof=1) / np.sqrt(x.shape[axis])
+    se = x.std(axis=axis, ddof=1) / np.sqrt(x.shape[axis]) if x.shape[axis]>1 else np.zeros_like(mean)
     return mean, se
 
 def print_error_summary(res):
-    methods = {}
-
-    if "diff_beta" in res:
-        methods["Proposed"] = res["diff_beta"]
-
-    if "diff_benchmark_beta" in res:
-        methods["Random"] = res["diff_benchmark_beta"]
-
-    if "diff_first_subset_beta" in res:
-        methods["Single subset"] = res["diff_first_subset_beta"]
-
-    if "diff_singlex_beta" in res:
-        methods["Union IV"] = res["diff_singlex_beta"]
-
-    if "diff_ols_beta" in res:
-        methods["OLS"] = res["diff_ols_beta"]
-
-    print("\nError summary:")
-    print("-" * 70)
-
-    for name, diff in methods.items():
-        err = norm_error(diff)
-
-        if len(err) == 0:
-            print(f"{name:15s} no valid result")
-            continue
-
-        print(
-            f"{name:15s} "
-            f"mean={err.mean():.4f}, "
-            f"median={np.median(err):.4f}, "
-            f"sd={err.std(ddof=1):.4f}, "
-            f"n={len(err)}"
-        )
+    print(summarize_errors(res).to_string(index=False))
 
 def plot_main_error(result_path, save_path):
     res = load_result(result_path)
@@ -83,7 +50,7 @@ def plot_main_error(result_path, save_path):
     errors = []
 
     if "diff_beta" in res:
-        methods.append("Proposed")
+        methods.append("Proposed (noisy oracle)")
         errors.append(norm_error(res["diff_beta"]))
 
     if "diff_benchmark_beta" in res:
@@ -94,10 +61,10 @@ def plot_main_error(result_path, save_path):
         methods.append("Single subset")
         errors.append(norm_error(res["diff_first_subset_beta"]))
 
-    # Omit Union IV if you do not want it
-    # if "diff_singlex_beta" in res:
-    #     methods.append("Union IV")
-    #     errors.append(norm_error(res["diff_singlex_beta"]))
+    for field,label in [("diff_singlex_beta","Selected-union IV"),("diff_full_iv_beta","Full IV (unrestricted)")]:
+        if field in res:
+            methods.append(label)
+            errors.append(norm_error(res[field]))
 
     if "diff_ols_beta" in res:
         methods.append("OLS")
@@ -105,7 +72,9 @@ def plot_main_error(result_path, save_path):
 
     # Combine all errors to choose a focused y-axis
     all_err = np.concatenate(errors)
-    upper = np.nanquantile(all_err, 0.95)
+    if not len(all_err):
+        raise ValueError("No finite errors to plot; inspect failure counts")
+    upper = max(np.quantile(all_err, 0.95), 1e-12)
 
     # Add small margin
     upper = upper * 1.15
@@ -122,13 +91,22 @@ def plot_main_error(result_path, save_path):
 
     plt.ylim(0, upper)
     plt.ylabel(r"$\|\hat{\beta}-\beta_0\|_2$")
-    plt.title("Global estimation error")
+    plt.title("Global estimation error (focused axis; finite trials)")
     plt.xticks(rotation=20)
     plt.tight_layout()
 
     os.makedirs(save_path, exist_ok=True)
     plt.savefig(os.path.join(save_path, "fig1_main_error_focused.png"), dpi=300)
     plt.savefig(os.path.join(save_path, "fig1_main_error_focused.pdf"))
+    plt.close()
+    summarize_errors(res).to_csv(Path(save_path)/"error_summary_with_failures.csv",index=False)
+    plt.figure(figsize=(9,5))
+    plt.boxplot(errors,labels=methods,showfliers=True)
+    plt.ylabel(r"$\|\hat{\beta}-\beta_0\|_2$")
+    plt.title("Global estimation error — full range")
+    plt.xticks(rotation=20); plt.tight_layout()
+    plt.savefig(Path(save_path)/"fig1_main_error_full.png",dpi=200)
+    plt.savefig(Path(save_path)/"fig1_main_error_full.pdf")
     plt.close()
 
 def plot_error_trajectory(result_path, save_path):
@@ -144,7 +122,7 @@ def plot_error_trajectory(result_path, save_path):
 
     plt.figure(figsize=(7, 5))
 
-    plt.plot(rounds, proposed_mean, marker="o", label="Proposed")
+    plt.plot(rounds, proposed_mean, marker="o", label="Proposed (noisy oracle)")
     plt.fill_between(
         rounds,
         proposed_mean - 1.96 * proposed_se,
@@ -185,7 +163,7 @@ def plot_coverage_trajectory(result_path, save_path, threshold=0.3):
 
     plt.figure(figsize=(7, 5))
 
-    plt.plot(rounds, proposed_mean, marker="o", label="Proposed")
+    plt.plot(rounds, proposed_mean, marker="o", label="Proposed (noisy oracle)")
     plt.fill_between(
         rounds,
         proposed_mean - 1.96 * proposed_se,
@@ -305,15 +283,16 @@ def plot_rho_comparison(base_path, save_path):
     plt.savefig(os.path.join(save_path, "fig5_time_dependence_focused.pdf"))
     plt.close()
 if __name__ == "__main__":
-
-    main_result_path = "../Simulation_Results/main/p10_d15_d_id15_d_max3_n_rounds5"
-    underid_base_path = "../Simulation_Results/underid"
-    rho_base_path = "../Simulation_Results/rho"
-    save_path = "../Simulation_Figures"
-
-    plot_main_error(main_result_path, save_path)
-    plot_error_trajectory(main_result_path, save_path)
-    plot_coverage_trajectory(main_result_path, save_path, threshold=0.3)
-
-    plot_underid_comparison(underid_base_path, save_path)
-    plot_rho_comparison(rho_base_path, save_path)
+    root = Path(__file__).resolve().parent
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_path", type=Path, default=root/"Simulation_Results")
+    parser.add_argument("--save_path", type=Path, default=root/"Simulation_Figures")
+    parser.add_argument("--result_path", type=Path, help="Plot one run instead of the full grid")
+    args = parser.parse_args()
+    main_path = args.result_path or args.base_path/"main"/"p10_d15_d_id15_d_max3_n_rounds5"
+    plot_main_error(main_path, args.save_path)
+    plot_error_trajectory(main_path, args.save_path)
+    plot_coverage_trajectory(main_path, args.save_path, threshold=0.3)
+    if args.result_path is None:
+        plot_underid_comparison(args.base_path/"underid", args.save_path)
+        plot_rho_comparison(args.base_path/"rho", args.save_path)

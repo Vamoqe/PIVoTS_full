@@ -1,169 +1,114 @@
-import os
+"""Simulation summaries with explicit failure counts and paired comparisons."""
+import argparse
+import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
 
 def load_result(path):
-    result_path = os.path.join(path, "results.npy")
-    if not os.path.exists(result_path):
-        raise FileNotFoundError(f"Cannot find results.npy at: {result_path}")
-    return np.load(result_path, allow_pickle=True).item()
+    directory=Path(path)
+    result=np.load(directory/'results.npy',allow_pickle=True).item()
+    if result.get('schema_version')!=2:
+        raise ValueError('Use schema-v2 results; older results use different identification/settings and must be rerun')
+    manifest=json.loads((directory/'manifest.json').read_text())
+    if result.get('status')!='complete' or manifest.get('status')!='complete':
+        raise ValueError('Refusing to summarize an incomplete/failed run')
+    if result.get('config_sha256')!=manifest.get('config_sha256'):
+        raise ValueError('Result/manifest configuration mismatch')
+    return result
 
 
 def norm_error(diff_array):
-    arr = np.asarray(diff_array, dtype=float)
+    arr=np.asarray(diff_array,dtype=float)
+    if arr.ndim not in (1,2):
+        raise ValueError('Errors must be trial-by-coefficient arrays')
+    return np.abs(arr) if arr.ndim==1 else np.linalg.norm(arr,axis=1)
 
-    if arr.ndim == 1:
-        err = np.abs(arr)
-    else:
-        err = np.linalg.norm(arr, axis=1)
 
-    err = err[~np.isnan(err)]
-    return err
+def error_statistics(diff_array):
+    all_errors=norm_error(diff_array)
+    errors=all_errors[np.isfinite(all_errors)]
+    n=len(errors); attempted=len(all_errors)
+    sd=float(np.std(errors,ddof=1)) if n>1 else np.nan
+    return {'Mean':float(np.mean(errors)) if n else np.nan,
+            'Median':float(np.median(errors)) if n else np.nan,'SD':sd,
+            'MCSE':sd/np.sqrt(n) if n else np.nan,
+            'Q25':float(np.quantile(errors,.25)) if n else np.nan,
+            'Q75':float(np.quantile(errors,.75)) if n else np.nan,
+            'P95':float(np.quantile(errors,.95)) if n else np.nan,
+            'P99':float(np.quantile(errors,.99)) if n else np.nan,
+            'N':n,'Attempted':attempted,'Failed':attempted-n,
+            'FailureRate':(attempted-n)/attempted if attempted else np.nan}
 
 
 def summarize_errors(res):
-    methods = {}
-
-    if "diff_beta" in res:
-        methods["Proposed"] = res["diff_beta"]
-
-    if "diff_benchmark_beta" in res:
-        methods["Random"] = res["diff_benchmark_beta"]
-
-    if "diff_first_subset_beta" in res:
-        methods["Single subset"] = res["diff_first_subset_beta"]
-
-    if "diff_ols_beta" in res:
-        methods["OLS"] = res["diff_ols_beta"]
-
-    rows = []
-
-    for name, diff in methods.items():
-        err = norm_error(diff)
-
-        rows.append({
-            "Method": name,
-            "Mean": np.mean(err),
-            "Median": np.median(err),
-            "SD": np.std(err, ddof=1),
-            "Q25": np.quantile(err, 0.25),
-            "Q75": np.quantile(err, 0.75),
-            "N": len(err),
-        })
-
-    return pd.DataFrame(rows)
+    methods=[('Proposed (noisy oracle)','diff_beta'),('Random','diff_benchmark_beta'),
+             ('Single subset','diff_first_subset_beta'),('Selected-union IV','diff_singlex_beta'),
+             ('Full IV (unrestricted)','diff_full_iv_beta'),('OLS','diff_ols_beta')]
+    return pd.DataFrame([dict(Method=name,**error_statistics(res[key])) for name,key in methods if key in res])
 
 
-def save_latex_table(df, save_path, filename):
-    os.makedirs(save_path, exist_ok=True)
+def paired_error_comparison(res,left='diff_beta',right='diff_benchmark_beta'):
+    a,b=norm_error(res[left]),norm_error(res[right])
+    if a.shape!=b.shape:
+        raise ValueError('Paired comparisons require one result per shared trial')
+    valid=np.isfinite(a)&np.isfinite(b)
+    difference=a[valid]-b[valid]
+    n=len(difference)
+    return {'left':left,'right':right,'attempted':len(a),'paired_finite':n,
+            'excluded_pairs':len(a)-n,'mean_difference':float(difference.mean()) if n else np.nan,
+            'mcse':float(difference.std(ddof=1)/np.sqrt(n)) if n>1 else np.nan}
 
-    latex = df.to_latex(
-        index=False,
-        float_format="%.4f",
-        escape=False,
-        column_format="lrrrrrr"
-    )
 
-    with open(os.path.join(save_path, filename), "w", encoding="utf-8") as f:
-        f.write(latex)
+def save_latex_table(df,save_path,filename):
+    directory=Path(save_path); directory.mkdir(parents=True,exist_ok=True)
+    # Avoid pandas' optional Jinja2 dependency for a plain numeric table.
+    def cell(value):
+        if isinstance(value, (float,np.floating)):
+            return f"{value:.4f}" if np.isfinite(value) else "--"
+        text=str(value)
+        return text.replace("&", r"\&").replace("%", r"\%").replace("_", r"\_")
+    rows=[r"\begin{tabular}{l"+"r"*(len(df.columns)-1)+"}",r"\hline",
+          " & ".join(cell(c) for c in df.columns)+r" \\",r"\hline"]
+    rows.extend(" & ".join(cell(v) for v in row)+r" \\" for row in df.itertuples(index=False,name=None))
+    rows.extend([r"\hline",r"\end{tabular}"])
+    (directory/filename).write_text("\n".join(rows)+"\n")
 
 
 def summarize_underid(base_path):
-    settings = [
-        ("$d_{\\max}=1, R=15$", "p10_d15_d_id15_d_max1_n_rounds15"),
-        ("$d_{\\max}=3, R=5$", "p10_d15_d_id15_d_max3_n_rounds5"),
-        ("$d_{\\max}=5, R=3$", "p10_d15_d_id15_d_max5_n_rounds3"),
-    ]
-
-    rows = []
-
-    for label, folder in settings:
-        res = load_result(os.path.join(base_path, folder))
-        err = norm_error(res["diff_beta"])
-
-        rows.append({
-            "Setting": label,
-            "Mean": np.mean(err),
-            "Median": np.median(err),
-            "SD": np.std(err, ddof=1),
-            "Q25": np.quantile(err, 0.25),
-            "Q75": np.quantile(err, 0.75),
-            "N": len(err),
-        })
-
+    rows=[]
+    for size,rounds in [(1,15),(3,5),(5,3)]:
+        res=load_result(Path(base_path)/f'p10_d15_d_id15_d_max{size}_n_rounds{rounds}')
+        rows.append(dict(Setting=f'dmax={size}, R={rounds}',**error_statistics(res['diff_beta'])))
     return pd.DataFrame(rows)
 
 
 def summarize_rho(base_path):
-    settings = [
-        ("$\\rho=0.2$", os.path.join("rho0p2", "p10_d15_d_id15_d_max3_n_rounds5")),
-        ("$\\rho=0.5$", os.path.join("rho0p5", "p10_d15_d_id15_d_max3_n_rounds5")),
-        ("$\\rho=0.8$", os.path.join("rho0p8", "p10_d15_d_id15_d_max3_n_rounds5")),
-        ("$\\rho=0.95$", os.path.join("rho0p95", "p10_d15_d_id15_d_max3_n_rounds5")),
-    ]
-
-    rows = []
-
-    for label, folder in settings:
-        res = load_result(os.path.join(base_path, folder))
-        err = norm_error(res["diff_beta"])
-
-        rows.append({
-            "Setting": label,
-            "Mean": np.mean(err),
-            "Median": np.median(err),
-            "SD": np.std(err, ddof=1),
-            "Q25": np.quantile(err, 0.25),
-            "Q75": np.quantile(err, 0.75),
-            "N": len(err),
-        })
-
+    rows=[]
+    for rho in [.2,.5,.8,.95]:
+        tag=str(rho).replace('.','p')
+        res=load_result(Path(base_path)/f'rho{tag}'/'p10_d15_d_id15_d_max3_n_rounds5')
+        rows.append(dict(Setting=f'rho={rho}',**error_statistics(res['diff_beta'])))
     return pd.DataFrame(rows)
 
 
-if __name__ == "__main__":
+def main():
+    root=Path(__file__).resolve().parent
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base_path',type=Path,default=root/'Simulation_Results')
+    parser.add_argument('--save_path',type=Path,default=root/'Simulation_Tables')
+    parser.add_argument('--result_path',type=Path,help='Summarize a single run instead of the full grid')
+    args=parser.parse_args(); args.save_path.mkdir(parents=True,exist_ok=True)
+    result=load_result(args.result_path or args.base_path/'main'/'p10_d15_d_id15_d_max3_n_rounds5')
+    tables={'main_error_summary':summarize_errors(result)}
+    if args.result_path is None:
+        tables.update(underid_summary=summarize_underid(args.base_path/'underid'),rho_summary=summarize_rho(args.base_path/'rho'))
+    for name,table in tables.items():
+        table.to_csv(args.save_path/f'table_{name}.csv',index=False)
+        save_latex_table(table,args.save_path,f'table_{name}.tex')
+        print(table.to_string(index=False))
+    pd.DataFrame([paired_error_comparison(result)]).to_csv(args.save_path/'paired_proposed_random.csv',index=False)
 
-    base_path = "../Simulation_Results"
-    save_path = "../Simulation_Tables"
 
-    main_path = os.path.join(
-        base_path,
-        "main",
-        "p10_d15_d_id15_d_max3_n_rounds5"
-    )
-
-    underid_path = os.path.join(base_path, "underid")
-    rho_path = os.path.join(base_path, "rho")
-
-    # Table 3: main experiment
-    res_main = load_result(main_path)
-    df_main = summarize_errors(res_main)
-
-    print("\nMain experiment summary")
-    print(df_main)
-
-    os.makedirs(save_path, exist_ok=True)
-    df_main.to_csv(os.path.join(save_path, "table_main_error_summary.csv"), index=False)
-    save_latex_table(df_main, save_path, "table_main_error_summary.tex")
-
-    # Table 4: underidentification sensitivity
-    df_underid = summarize_underid(underid_path)
-
-    print("\nUnderidentification sensitivity summary")
-    print(df_underid)
-
-    df_underid.to_csv(os.path.join(save_path, "table_underid_summary.csv"), index=False)
-    save_latex_table(df_underid, save_path, "table_underid_summary.tex")
-
-    # Table 5: rho sensitivity
-    df_rho = summarize_rho(rho_path)
-
-    print("\nTime dependence sensitivity summary")
-    print(df_rho)
-
-    df_rho.to_csv(os.path.join(save_path, "table_rho_summary.csv"), index=False)
-    save_latex_table(df_rho, save_path, "table_rho_summary.tex")
-
-    print("\nTables saved to:")
-    print(save_path)
+if __name__=='__main__': main()
